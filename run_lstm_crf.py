@@ -143,59 +143,71 @@ def predict(args, model, processor):
     model_path = args.output_dir / 'best-model.bin'
     model = load_model(model, model_path=str(model_path))
 
-    metric = SeqEntityScore(args.id2label, markup=args.markup)
+    # metric = SeqEntityScore(args.id2label, markup=args.markup)
     # 取数据 test_data = [{id: ,context: ,tag: ,raw_context: },{},{}...]
-
-    test_dataset = load_and_cache_examples(args, processor, data_type='test')
-    test_dataloader = DatasetLoader(data=test_dataset, batch_size=args.batch_size,
-                                    shuffle=False, seed=args.seed, sort=False,
-                                    vocab=processor.vocab, label2id=args.label2id)
-
-    model.eval()
     start_time = time.time()
+    test_data = load_and_cache_examples(args, processor, data_type='test')
+    # test_data [{'context':,'tag':}，{},{}]
+    origins = []
+    founds = []
+    rights = []
+
     results = []
-    for step, batch in enumerate(test_dataloader):
-        input_ids, input_mask, input_tags, input_lens = batch
+    for step, line in enumerate(test_data):
+        token_a = line['context'].split(" ")
+        tag_a = line['tag'].split(" ")
+        input_ids = [processor.vocab.to_index(w) for w in token_a]
+        input_mask = [1] * len(token_a)
+        input_lens = [len(token_a)]
+        model.eval()
         with torch.no_grad():
+            input_ids = torch.tensor([input_ids], dtype=torch.long)
+            input_mask = torch.tensor([input_mask], dtype=torch.long)
+            input_lens = torch.tensor([input_lens], dtype=torch.long)
             input_ids = input_ids.to(args.device)
             input_mask = input_mask.to(args.device)
-            input_tags = input_tags.to(args.device)
             features = model.forward_loss(input_ids, input_mask, input_lens, input_tags=None)
             tags, _ = model.crf._obtain_labels(features, args.id2label, input_lens)
-            input_tags = input_tags.cpu().numpy()
-            target = [input_[:len_] for input_, len_ in zip(input_tags, input_lens)]
-            metric.update(pred_paths=tags, label_paths=target)
+        label_entities = get_entities(tags[0], args.id2label)
+        gold_entities = get_entities(tag_a, args.id2label)
+        # 记录标签
+        origins.extend(gold_entities)
+        founds.extend(label_entities)
+        rights.extend([pre_entity for pre_entity in label_entities if pre_entity in gold_entities])
 
-        input_ids = input_ids.tolist()
-        context = [processor.vocab.to_word(idx) for input_id in input_ids for idx in input_id]
-        target_2tag = []
-        for t in target:
-            for indx, tag in enumerate(t):
-                if not isinstance(tag, str):
-                    tag = args.id2label[tag]
-                target_2tag.append(tag)
+        json_d = {}
+        # json_d['tag_seq'] = " ".join(tags[0])
+        json_d['pre'] = label_entities
+        json_d['gold'] = gold_entities
+        results.append(json_d)
+    # result [{'pre': ,'gold': },{},{}]
 
-        for label_path, pre_path in zip(target, tags):
-            label_entities = get_entities(label_path, args.id2label)
-            pre_entities = get_entities(pre_path, args.id2label)
-            json_d = {}
-            json_d['context'] = test_dataset['context']
-            json_d['tag'] = target_2tag
-            json_d['true'] = label_entities
-            json_d['pre'] = pre_entities
-            results.append(json_d)
+    test_submit = []
+    for x, y in zip(test_data, results):
+        json_d = {}
+        context = list(x['context'])
+        json_d['context'] = ''.join(context)
+        json_d['label'] = y['pre']
+        # entities = y['pre']
+        # if len(entities) != 0:
+        #     for subject in entities:
+        #         tag = subject[0]
+        #         start = subject[1]
+        #         end = subject[2]
+        #         word = "".join(context[start:end + 1])
+        #         json_d['label'][tag] = word
 
-    output_predic_file = str(args.output_dir / "test_prediction.json")
-    with open(output_predic_file, "w") as writer:
-        for record in results:
-            writer.write(json.dumps(record).encode('utf-8').decode('unicode_escape') + '\n')
+        json_d['gold'] = y['gold']
+        test_submit.append(json_d)
 
-    test_data_file = str(args.output_dir / "test_data.json")
-    with open(test_data_file, 'w') as write:
-        for data in test_dataset:
-            write.write(json.dumps(data).encode('utf-8').decode('unicode_escape') + '\n')
+    output_submit_file = str(args.output_dir / "test_submit.json")
+    with open(output_submit_file, 'w') as writer:
+        for x in test_submit:
+            writer.write(json.dumps(x, ensure_ascii=False) + '\n')
 
-    test_f1 = metric.result()
+    precision = len(rights) / len(founds)
+    recall = len(rights) / len(origins)
+    test_f1 = (2 * precision * recall) / (precision + recall)
     logger.info(f'test_time: {time.time() - start_time:.1f}  test_f1: {test_f1}')
 
 
