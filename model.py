@@ -59,3 +59,4 @@ class NERModel(nn.Module):
         else:
             return features
 
+#test
